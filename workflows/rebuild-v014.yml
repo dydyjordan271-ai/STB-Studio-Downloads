@@ -1,0 +1,82 @@
+name: Rebuild STB Studio 0.1.14 for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'rebuild014/**'
+      - '.github/workflows/rebuild-v014.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build STB Studio 0.1.14 installer and portable ZIP
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download and verify STB Studio 0.1.13
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/dydyjordan271-ai/STB-Studio-Downloads/releases/download/v0.1.13/STB.Studio-0.1.13-full.nupkg'
+          Invoke-WebRequest -Uri $url -OutFile stb013.zip
+          $expected = '282f839b5d18263c1e095311bfa0cb8fc4e2c84fcc913ec78f9f05ccaf5fb0c2'
+          $actual = (Get-FileHash stb013.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Original package checksum mismatch: $actual" }
+          Expand-Archive -Path stb013.zip -DestinationPath base
+
+      - name: Decompile Windows editor source
+        shell: pwsh
+        run: |
+          dotnet tool install ilspycmd --version 11.2.0.10050 --tool-path tools_cli
+          if ($LASTEXITCODE -ne 0) { throw 'ILSpy installation failed' }
+          & .\tools_cli\ilspycmd.exe -p --nested-directories -o src base/lib/app/STB.Studio.dll
+          if ($LASTEXITCODE -ne 0) { throw 'Source reconstruction failed' }
+
+      - name: Apply archive and image-brand editor upgrades
+        shell: pwsh
+        run: |
+          python rebuild014/patch.py src base
+          if ($LASTEXITCODE -ne 0) { throw 'Patch 0.1.14 failed' }
+
+      - name: Compile self-contained Windows application
+        shell: pwsh
+        run: |
+          dotnet publish src/STB.Studio.csproj -c Release -r win-x64 --self-contained true -p:WarningLevel=0 -o publish
+          if ($LASTEXITCODE -ne 0) { throw 'STB Studio compilation failed' }
+          if (!(Test-Path publish/STB.Studio.exe)) { throw 'Missing Windows executable' }
+          if (!(Test-Path publish/Tools/brands-atlas.png)) { throw 'Missing logo library' }
+
+      - name: Package installer and update files
+        shell: pwsh
+        run: |
+          dotnet tool install vpk --version 1.2.161 --tool-path tools_cli
+          if ($LASTEXITCODE -ne 0) { throw 'Velopack installation failed' }
+          & .\tools_cli\vpk.exe pack --packId STB.Studio --packVersion 0.1.14 --packDir publish --mainExe STB.Studio.exe --packTitle 'STB Studio' --packAuthors 'STB Studio' --channel win --runtime win-x64 --releaseNotes rebuild014/release-notes.md --outputDir dist --yes
+          if ($LASTEXITCODE -ne 0) { throw 'Windows package failed' }
+          if (!(Test-Path dist/STB.Studio-win-Setup.exe)) { throw 'Missing installer' }
+
+      - name: Make Windows packages downloadable from Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: STB-Studio-0.1.14-Windows
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release v0.1.14
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = @(Get-ChildItem dist -File | ForEach-Object { $_.FullName })
+          if ($files.Count -lt 3) { throw 'Missing update artifacts' }
+          gh release create v0.1.14 $files --title 'STB Studio 0.1.14 — Archives & logos GTA' --notes-file rebuild014/release-notes.md --prerelease
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
