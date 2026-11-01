@@ -1,0 +1,84 @@
+name: Rebuild STB Studio 0.1.13 for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'rebuild/**'
+      - '.github/workflows/rebuild-v013.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 installer and portable ZIP
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Get original STB Studio 0.1.10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/dydyjordan271-ai/STB-Studio-Downloads/releases/download/v0.1.10/STB.Studio-0.1.10-full.nupkg'
+          Invoke-WebRequest -Uri $url -OutFile stb010.zip
+          $expected = '867e9879b6fa690a8808e452f310870cde828b01e999a628bb298fb0d618fe3f'
+          $actual = (Get-FileHash stb010.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Original package checksum mismatch: $actual" }
+          Expand-Archive -Path stb010.zip -DestinationPath base
+
+      - name: Decompile application sources
+        shell: pwsh
+        run: |
+          dotnet tool install ilspycmd --version 11.2.0.10050 --tool-path tools_cli
+          & .\tools_cli\ilspycmd.exe -p --nested-directories -o src base/lib/app/STB.Studio.dll
+
+      - name: Apply STB Studio 0.1.13 improvements
+        shell: pwsh
+        run: python rebuild/patch.py src base
+
+      - name: Build native RSC7/YFT mesh engine
+        shell: pwsh
+        run: |
+          cmake -S rebuild/native -B mesh-build -A x64
+          cmake --build mesh-build --config Release --parallel 4
+          $mesh = 'mesh-build/STB/Release/stb-mesh.exe'
+          if (!(Test-Path $mesh)) { throw "Native mesh editor missing: $mesh" }
+          Copy-Item $mesh src/Tools/stb-mesh.exe
+
+      - name: Build standalone Windows STB Studio
+        shell: pwsh
+        run: |
+          dotnet publish src/STB.Studio.csproj -c Release -r win-x64 --self-contained true -p:WarningLevel=0 -o publish
+          if (!(Test-Path publish/STB.Studio.exe)) { throw 'Windows app build missing' }
+
+      - name: Create installer, Velopack update package and portable ZIP
+        shell: pwsh
+        run: |
+          dotnet tool install vpk --version 1.2.161 --tool-path tools_cli
+          & .\tools_cli\vpk.exe pack --packId STB.Studio --packVersion 0.1.13 --packDir publish --mainExe STB.Studio.exe --packTitle 'STB Studio' --packAuthors 'STB Studio' --channel win --runtime win-x64 --releaseNotes rebuild/release-notes.md --outputDir dist --yes
+          if ($LASTEXITCODE -ne 0) { throw 'Velopack packaging failed' }
+          if (!(Test-Path dist/STB.Studio-win-Setup.exe)) { throw 'Installer not generated' }
+
+      - name: Publish build artifacts for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: STB-Studio-0.1.13-Windows
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish permanent GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = @(Get-ChildItem dist -File | ForEach-Object { $_.FullName })
+          if ($files.Count -lt 3) { throw 'Not enough release files' }
+          gh release create v0.1.13 $files --title 'STB Studio 0.1.13 — Éditeur YFT (expérimental)' --notes-file rebuild/release-notes.md --prerelease
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
