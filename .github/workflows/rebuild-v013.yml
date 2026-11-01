@@ -37,7 +37,9 @@ jobs:
         shell: pwsh
         run: |
           dotnet tool install ilspycmd --version 11.2.0.10050 --tool-path tools_cli
-          & .\tools_cli\ilspycmd.exe -p --nested-directories -o src base/lib/app/STB.Studio.dll
+          $ilspy = Get-ChildItem -Path tools_cli -File -Filter 'ilspycmd*' | Select-Object -First 1
+          if (-not $ilspy) { Get-ChildItem tools_cli; throw 'ilspycmd introuvable' }
+          & $ilspy.FullName -p --nested-directories -o src base/lib/app/STB.Studio.dll
 
       - name: Apply STB Studio 0.1.13 improvements
         shell: pwsh
